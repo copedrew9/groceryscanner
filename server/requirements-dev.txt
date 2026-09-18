@@ -1,0 +1,3 @@
+# Test-only dependencies. Kept out of requirements.txt so the image stays lean.
+-r requirements.txt
+pytest==9.1.1
