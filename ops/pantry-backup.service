@@ -1,0 +1,12 @@
+# Spec section 9. Install to /etc/systemd/system/ on the mini PC.
+[Unit]
+Description=Snapshot the pantry inventory database
+# The snapshot is only meaningful once the database exists, which means
+# after the server has started at least once.
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/inventory/ops/backup-snapshot.sh
+Environment=DB_PATH=/srv/inventory/data/inventory.db
+Environment=BACKUP_DIR=/srv/inventory/backup
