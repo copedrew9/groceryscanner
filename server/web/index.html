@@ -90,6 +90,42 @@
     padding: 12px;
     width: 100%;
   }
+  h2 {
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin: 28px 0 4px;
+  }
+  .name-button {
+    font-size: 14px;
+    min-height: 32px;
+    min-width: 0;
+    padding: 0 10px;
+    margin-top: 4px;
+  }
+  .name-form { gap: 8px; padding: 10px 0; }
+  .name-form .buttons { display: flex; gap: 8px; }
+  .name-form .buttons button { flex: 1; }
+  .event {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 15px;
+  }
+  .event-when {
+    color: var(--muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .event-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .event-change { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .event-change.rejected { color: var(--warn); }
+  .event-change.manual { color: var(--muted); }
+  #load-more { width: 100%; margin-top: 12px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -111,6 +147,10 @@
 
 <main id="main" hidden>
   <ul id="inventory"></ul>
+
+  <h2>Recent activity</h2>
+  <ul id="events"></ul>
+  <button id="load-more" type="button" hidden>Load more</button>
 </main>
 
 <script>
@@ -125,7 +165,12 @@ const el = {
   tokenInput: document.getElementById("token-input"),
   main: document.getElementById("main"),
   inventory: document.getElementById("inventory"),
+  events: document.getElementById("events"),
+  loadMore: document.getElementById("load-more"),
 };
+
+/* The id to pass as ?before= for the next page of events, or null at the end. */
+let eventsCursor = null;
 
 function setStatus(text, isError) {
   el.status.textContent = text;
@@ -201,6 +246,16 @@ function renderInventory(items) {
       details.append(brand);
     }
 
+    /* Anything the lookup could not identify can be named by hand. */
+    if (!item.name) {
+      const nameButton = document.createElement("button");
+      nameButton.type = "button";
+      nameButton.className = "name-button";
+      nameButton.textContent = "Name this";
+      nameButton.addEventListener("click", () => showNameForm(item, row));
+      details.append(nameButton);
+    }
+
     const quantity = document.createElement("span");
     quantity.className = item.quantity === 0 ? "quantity zero" : "quantity";
     quantity.textContent = String(item.quantity);
@@ -247,6 +302,126 @@ function makeStepper(item, delta, label, quantityNode) {
   return button;
 }
 
+/* Replaces the row with a small form, so naming a product happens where you
+   are looking rather than on another screen. */
+function showNameForm(item, row) {
+  const form = document.createElement("form");
+  form.className = "name-form";
+
+  const nameInput = document.createElement("input");
+  nameInput.placeholder = "Name";
+  nameInput.required = true;
+  nameInput.value = item.name || "";
+
+  const brandInput = document.createElement("input");
+  brandInput.placeholder = "Brand (optional)";
+  brandInput.value = item.brand || "";
+
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", load);
+
+  const buttons = document.createElement("div");
+  buttons.className = "buttons";
+  buttons.append(cancel, save);
+
+  const label = document.createElement("div");
+  label.className = "brand";
+  label.textContent = item.barcode;
+
+  form.append(label, nameInput, brandInput, buttons);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) return;
+    save.disabled = true;
+    try {
+      await api("/api/products/" + encodeURIComponent(item.barcode), {
+        method: "PUT",
+        body: JSON.stringify({ name: name, brand: brandInput.value.trim() || null }),
+      });
+      /* Reload rather than patch the row: the new name changes where the item
+         sorts, and it shows up in the event list too. */
+      load();
+    } catch (error) {
+      if (error instanceof Unauthorized) return;
+      setStatus(error.message, true);
+      save.disabled = false;
+    }
+  });
+
+  row.replaceChildren(form);
+  nameInput.focus();
+}
+
+function formatWhen(iso) {
+  /* Timestamps arrive as UTC ending in Z, so the browser renders them in
+     whatever zone the phone is in. Spec 6.6. */
+  const when = new Date(iso);
+  if (isNaN(when)) return iso;
+  return when.toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+function describeChange(event) {
+  if (event.result === "rejected_not_in_stock") {
+    return { text: "not in stock", className: "event-change rejected" };
+  }
+  const sign = event.quantity_delta > 0 ? "+" : event.quantity_delta < 0 ? "\u2212" : "";
+  const amount = sign + Math.abs(event.quantity_delta);
+  return event.source === "manual"
+    ? { text: amount + " by hand", className: "event-change manual" }
+    : { text: amount, className: "event-change" };
+}
+
+function appendEvents(events) {
+  for (const event of events) {
+    const row = document.createElement("li");
+    row.className = "event";
+
+    const when = document.createElement("span");
+    when.className = "event-when";
+    when.textContent = formatWhen(event.received_at);
+
+    const name = document.createElement("span");
+    name.className = "event-name";
+    name.textContent = event.name || event.barcode;
+
+    const change = describeChange(event);
+    const amount = document.createElement("span");
+    amount.className = change.className;
+    amount.textContent = change.text;
+
+    row.append(when, name, amount);
+    el.events.append(row);
+  }
+}
+
+async function loadEvents(append) {
+  el.loadMore.disabled = true;
+  try {
+    const query = append && eventsCursor ? "?before=" + eventsCursor : "";
+    const data = await api("/api/events" + query);
+    if (!append) el.events.replaceChildren();
+    appendEvents(data.events);
+    eventsCursor = data.next_before;
+    /* next_before is null on the last page, which is how the button knows to
+       stop offering. */
+    el.loadMore.hidden = eventsCursor === null;
+  } catch (error) {
+    if (!(error instanceof Unauthorized)) setStatus(error.message, true);
+  } finally {
+    el.loadMore.disabled = false;
+  }
+}
+
 async function load() {
   if (!localStorage.getItem(TOKEN_KEY)) {
     showTokenForm("Enter the API token to get started.");
@@ -259,6 +434,7 @@ async function load() {
   try {
     const data = await api("/api/inventory");
     renderInventory(data.items);
+    await loadEvents(false);
   } catch (error) {
     if (!(error instanceof Unauthorized)) setStatus(error.message, true);
   } finally {
@@ -275,6 +451,7 @@ el.tokenForm.addEventListener("submit", (event) => {
 });
 
 el.refresh.addEventListener("click", load);
+el.loadMore.addEventListener("click", () => loadEvents(true));
 
 load();
 </script>

@@ -234,3 +234,156 @@ def adjust_inventory(
         raise
 
     return {"barcode": barcode, "quantity": new_quantity, "updated_at": now}
+
+
+def list_events(
+    conn: sqlite3.Connection, limit: int, before: int | None = None
+) -> tuple[list[sqlite3.Row], int | None]:
+    """A page of events, newest first, plus the cursor for the next page.
+
+    Spec 6.6: paging by id rather than by offset means scans arriving while you
+    browse do not shift the rows under you.
+
+    One extra row is fetched to find out whether a next page exists, so
+    next_before is null on the last page instead of pointing at nothing.
+    """
+    sql = """
+        SELECT e.id, e.source, e.barcode, e.action, e.quantity_delta,
+               e.result, e.received_at,
+               p.name, p.brand
+          FROM scan_events AS e
+          LEFT JOIN products AS p ON p.barcode = e.barcode
+         {where}
+         ORDER BY e.id DESC
+         LIMIT ?
+    """
+    if before is None:
+        rows = conn.execute(sql.format(where=""), (limit + 1,)).fetchall()
+    else:
+        rows = conn.execute(
+            sql.format(where="WHERE e.id < ?"), (before, limit + 1)
+        ).fetchall()
+
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_before = page[-1]["id"] if (has_more and page) else None
+    return page, next_before
+
+
+def get_product(conn: sqlite3.Connection, barcode: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT barcode, name, brand, image_url, source, fetched_at "
+        "FROM products WHERE barcode = ?",
+        (barcode,),
+    ).fetchone()
+
+
+def put_manual_product(
+    conn: sqlite3.Connection, barcode: str, name: str, brand: str | None
+) -> dict:
+    """Spec 6.6: a hand-entered name sets source = 'manual'.
+
+    image_url is left as it was: a name typed in by hand says nothing about
+    whether the picture the lookup found is wrong.
+    """
+    now = utc_now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            """
+            INSERT INTO products (barcode, name, brand, image_url, source, fetched_at)
+            VALUES (?, ?, ?, NULL, ?, ?)
+            ON CONFLICT(barcode) DO UPDATE
+                SET name = excluded.name,
+                    brand = excluded.brand,
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at
+            """,
+            (barcode, name, brand, "manual", now),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return dict(get_product(conn, barcode))
+
+
+# --- product lookup support (spec 6.7) ---------------------------------------
+
+LOOKUP_MAX_AGE_DAYS = 90
+
+
+def _is_stale(fetched_at: str | None, now: datetime | None = None) -> bool:
+    if not fetched_at:
+        return True
+    try:
+        # Our timestamps end in Z; fromisoformat wants an explicit offset
+        # before 3.11, and this keeps the parsing version-independent.
+        stamp = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True  # unparseable means we cannot trust it; look it up again
+    reference = now or datetime.now(timezone.utc)
+    return (reference - stamp).days >= LOOKUP_MAX_AGE_DAYS
+
+
+def product_needs_lookup(conn: sqlite3.Connection, barcode: str) -> bool:
+    """Spec 6.7: no row, never fetched, or the cache is over 90 days old.
+
+    A row with source = 'manual' is never refreshed, so a name you typed in is
+    not quietly replaced later.
+
+    Deviation worth knowing about: the spec also lists "its name is null" as a
+    trigger. Taken literally, a barcode Open Food Facts does not have gets a
+    row with a null name, which would then re-trigger a lookup on every single
+    scan of that item -- exactly the hammering the 90-day cache exists to
+    avoid. fetched_at covers the same ground without the storm, so a row that
+    was fetched and came back nameless waits out the 90 days like any other.
+    """
+    row = conn.execute(
+        "SELECT source, fetched_at FROM products WHERE barcode = ?", (barcode,)
+    ).fetchone()
+    if row is None:
+        return True
+    if row["source"] == "manual":
+        return False
+    return _is_stale(row["fetched_at"])
+
+
+def store_lookup_result(
+    conn: sqlite3.Connection, barcode: str, product: dict | None
+) -> None:
+    """Cache what the lookup found. product is None when there was no match.
+
+    The WHERE clause on the upsert is what stops a lookup from overwriting a
+    manual row. Doing it in SQL rather than with a read-then-write means a
+    manual edit landing mid-lookup still wins.
+    """
+    fields = product or {}
+    source = "openfoodfacts" if product is not None else "unknown"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            """
+            INSERT INTO products (barcode, name, brand, image_url, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(barcode) DO UPDATE
+                SET name = excluded.name,
+                    brand = excluded.brand,
+                    image_url = excluded.image_url,
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at
+                WHERE products.source <> 'manual'
+            """,
+            (
+                barcode,
+                fields.get("name"),
+                fields.get("brand"),
+                fields.get("image_url"),
+                source,
+                utc_now(),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise

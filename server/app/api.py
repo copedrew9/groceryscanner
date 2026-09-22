@@ -127,3 +127,57 @@ def patch_inventory(
     return db.adjust_inventory(
         conn, checked_barcode(barcode), quantity=quantity, delta=delta
     )
+
+
+DEFAULT_EVENT_LIMIT = 50
+MAX_EVENT_LIMIT = 100
+
+
+@router.get("/events")
+def get_events(
+    limit: int = DEFAULT_EVENT_LIMIT,
+    before: int | None = None,
+    conn: sqlite3.Connection = Depends(db.get_conn),
+) -> dict:
+    """Scan events, newest first, paged by id. Spec 6.6."""
+    if not 1 <= limit <= MAX_EVENT_LIMIT:
+        raise invalid_request(f"limit must be between 1 and {MAX_EVENT_LIMIT}")
+    if before is not None and before < 1:
+        raise invalid_request("before must be a positive id")
+
+    rows, next_before = db.list_events(conn, limit, before)
+    return {"events": [dict(row) for row in rows], "next_before": next_before}
+
+
+@router.get("/products/{barcode}")
+def get_product(
+    barcode: str, conn: sqlite3.Connection = Depends(db.get_conn)
+) -> dict:
+    row = db.get_product(conn, checked_barcode(barcode))
+    if row is None:
+        raise HTTPException(status_code=404, detail="No product with that barcode")
+    return dict(row)
+
+
+@router.put("/products/{barcode}")
+def put_product(
+    barcode: str,
+    payload: Any = Body(default=None),
+    conn: sqlite3.Connection = Depends(db.get_conn),
+) -> dict:
+    """Name a product by hand. Sets source = 'manual'. Spec 6.6."""
+    if not isinstance(payload, dict):
+        raise invalid_request("Body must be a JSON object")
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise invalid_request('"name" must be a non-empty string')
+
+    brand = payload.get("brand")
+    if brand is not None and not isinstance(brand, str):
+        raise invalid_request('"brand" must be a string or null')
+    brand = brand.strip() if isinstance(brand, str) else None
+
+    return db.put_manual_product(
+        conn, checked_barcode(barcode), name.strip(), brand or None
+    )
