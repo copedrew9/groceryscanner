@@ -52,7 +52,12 @@ def connect(path: str | None = None) -> sqlite3.Connection:
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:
-    """FastAPI dependency: one connection per request, closed when it ends."""
+    """FastAPI dependency: one connection per request, closed when it ends.
+
+    Worth knowing while writing transactional code: closing a connection with
+    a transaction still open rolls it back. A missing COMMIT therefore loses
+    the write silently rather than raising, which is an easy bug to chase.
+    """
     conn = connect()
     try:
         yield conn
@@ -246,6 +251,9 @@ def list_events(
 
     One extra row is fetched to find out whether a next page exists, so
     next_before is null on the last page instead of pointing at nothing.
+
+    The only thing formatted into the SQL is a fixed WHERE fragment chosen
+    here; every value still goes in as a "?" parameter.
     """
     sql = """
         SELECT e.id, e.source, e.barcode, e.action, e.quantity_delta,

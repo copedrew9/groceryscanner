@@ -23,6 +23,9 @@ BARCODE_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,32}\Z")
 MIN_BATCH = 1
 MAX_BATCH = 100
 
+DEFAULT_EVENT_LIMIT = 50
+MAX_EVENT_LIMIT = 100
+
 
 def invalid_request(message: str) -> HTTPException:
     """422 in the spec's error shape; main.py maps the status to a code."""
@@ -123,14 +126,9 @@ def patch_inventory(
     conn: sqlite3.Connection = Depends(db.get_conn),
 ) -> dict:
     """A manual edit, which also writes a scan_events row. Spec 6.6."""
+    checked = checked_barcode(barcode)
     quantity, delta = adjustment(payload)
-    return db.adjust_inventory(
-        conn, checked_barcode(barcode), quantity=quantity, delta=delta
-    )
-
-
-DEFAULT_EVENT_LIMIT = 50
-MAX_EVENT_LIMIT = 100
+    return db.adjust_inventory(conn, checked, quantity=quantity, delta=delta)
 
 
 @router.get("/events")
@@ -166,6 +164,7 @@ def put_product(
     conn: sqlite3.Connection = Depends(db.get_conn),
 ) -> dict:
     """Name a product by hand. Sets source = 'manual'. Spec 6.6."""
+    checked = checked_barcode(barcode)
     if not isinstance(payload, dict):
         raise invalid_request("Body must be a JSON object")
 
@@ -174,10 +173,9 @@ def put_product(
         raise invalid_request('"name" must be a non-empty string')
 
     brand = payload.get("brand")
-    if brand is not None and not isinstance(brand, str):
+    if isinstance(brand, str):
+        brand = brand.strip() or None  # a blank brand is no brand
+    elif brand is not None:
         raise invalid_request('"brand" must be a string or null')
-    brand = brand.strip() if isinstance(brand, str) else None
 
-    return db.put_manual_product(
-        conn, checked_barcode(barcode), name.strip(), brand or None
-    )
+    return db.put_manual_product(conn, checked, name.strip(), brand)
