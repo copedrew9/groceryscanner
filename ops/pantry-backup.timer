@@ -1,0 +1,14 @@
+# Spec section 9: run the snapshot daily, before restic runs.
+[Unit]
+Description=Daily pantry inventory snapshot
+
+[Timer]
+OnCalendar=daily
+# Catch up after the machine was off at the scheduled time.
+Persistent=true
+# Spread the start a little so it does not contend with everything else
+# that fires at midnight.
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

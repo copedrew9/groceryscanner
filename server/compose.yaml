@@ -1,0 +1,16 @@
+# Spec section 8.
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Published on every interface, including tailscale0, so the pantry is
+      # readable from the store. Limit it to your own devices with a
+      # Tailscale ACL -- never a port forward.
+      - "8080:8080"
+    volumes:
+      # The database lives on the host, so a backup is a file copy.
+      - /srv/inventory/data:/data
+    env_file: .env
+    environment:
+      DB_PATH: /data/inventory.db
