@@ -67,6 +67,33 @@ def lookup_barcodes(raw_scans: list) -> list[str]:
     return ordered
 
 
+def adjustment(payload: Any) -> tuple[int | None, int | None]:
+    """Spec 6.6: PATCH /inventory takes exactly one of quantity or delta."""
+    if not isinstance(payload, dict):
+        raise invalid_request("Body must be a JSON object")
+
+    has_quantity = "quantity" in payload
+    has_delta = "delta" in payload
+    if has_quantity == has_delta:  # both, or neither
+        raise invalid_request('Send exactly one of "quantity" or "delta"')
+
+    field = "quantity" if has_quantity else "delta"
+    value = payload[field]
+    # JSON true is an int in Python, so bool has to be excluded by hand or
+    # {"delta": true} would quietly mean {"delta": 1}.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise invalid_request(f'"{field}" must be a whole number')
+
+    return (value, None) if has_quantity else (None, value)
+
+
+def checked_barcode(barcode: str) -> str:
+    """Path barcodes get the same validation as the ones in a scan batch."""
+    if not BARCODE_PATTERN.match(barcode):
+        raise invalid_request("Barcode must be 1-32 characters of A-Z, a-z, 0-9 or -")
+    return barcode
+
+
 @router.post("/scans")
 def post_scans(
     background: BackgroundTasks,
@@ -81,3 +108,22 @@ def post_scans(
     for barcode in lookup_barcodes(raw_scans):
         background.add_task(lookup.refresh_if_needed, barcode)
     return {"results": results}
+
+
+@router.get("/inventory")
+def get_inventory(conn: sqlite3.Connection = Depends(db.get_conn)) -> dict:
+    """Everything in the pantry, joined with product names. Spec 6.6."""
+    return {"items": [dict(row) for row in db.list_inventory(conn)]}
+
+
+@router.patch("/inventory/{barcode}")
+def patch_inventory(
+    barcode: str,
+    payload: Any = Body(default=None),
+    conn: sqlite3.Connection = Depends(db.get_conn),
+) -> dict:
+    """A manual edit, which also writes a scan_events row. Spec 6.6."""
+    quantity, delta = adjustment(payload)
+    return db.adjust_inventory(
+        conn, checked_barcode(barcode), quantity=quantity, delta=delta
+    )

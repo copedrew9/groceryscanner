@@ -163,3 +163,74 @@ def replay_events(conn: sqlite3.Connection) -> int:
         conn.execute("ROLLBACK")
         raise
     return rebuilt
+
+
+def list_inventory(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every inventory row with whatever product details we have. Spec 6.6.
+
+    LEFT JOIN, not JOIN: a barcode always has an inventory row before it has a
+    products row, and unnamed items still have to show up on the page.
+    """
+    return conn.execute(
+        """
+        SELECT i.barcode, i.quantity, i.updated_at,
+               p.name, p.brand, p.image_url
+          FROM inventory AS i
+          LEFT JOIN products AS p ON p.barcode = i.barcode
+         ORDER BY COALESCE(p.name, i.barcode) COLLATE NOCASE, i.barcode
+        """
+    ).fetchall()
+
+
+def adjust_inventory(
+    conn: sqlite3.Connection,
+    barcode: str,
+    *,
+    quantity: int | None = None,
+    delta: int | None = None,
+) -> dict:
+    """Apply a manual edit. Spec 6.6, acceptance criterion 6.
+
+    Exactly one of quantity or delta; the caller has already checked that. The
+    event row and the inventory row are written in one transaction so the log
+    can never disagree with the count.
+    """
+    conn.execute("BEGIN IMMEDIATE")  # take the write lock before doing any work
+    try:
+        row = conn.execute(
+            "SELECT quantity FROM inventory WHERE barcode = ?", (barcode,)
+        ).fetchone()
+        current = row["quantity"] if row is not None else 0
+
+        target = quantity if quantity is not None else current + (delta or 0)
+        new_quantity = max(0, target)  # spec 6.6: the result is floored at 0
+        # What actually happened, which is not what was asked for when the
+        # floor kicks in. Storing the real change keeps criterion 7 true:
+        # quantity always equals the sum of its deltas.
+        applied_delta = new_quantity - current
+
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO scan_events
+                (source, nonce, barcode, action, quantity_delta, result, received_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("manual", None, barcode, "adjust", applied_delta, "applied", now),
+        )
+        conn.execute(
+            """
+            INSERT INTO inventory (barcode, quantity, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(barcode) DO UPDATE
+                SET quantity = excluded.quantity,
+                    updated_at = excluded.updated_at
+            """,
+            (barcode, new_quantity, now),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return {"barcode": barcode, "quantity": new_quantity, "updated_at": now}

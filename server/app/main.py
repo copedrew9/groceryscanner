@@ -8,10 +8,12 @@ from __future__ import annotations
 import hmac
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import api, db
@@ -94,6 +96,11 @@ def handle_validation_error(request, exc: RequestValidationError) -> JSONRespons
     return error_response(422, "invalid_request", message)
 
 
-# Routes are registered before any static mount, or the mount at "/" swallows
-# /api/ requests. The mount itself arrives with the web page in a later stage.
+# Order matters: the API routes are registered first. A static mount at "/"
+# matches every path, so mounting it first would swallow /api/ requests.
 app.include_router(api.router, prefix="/api", dependencies=[Depends(require_token)])
+
+# Spec 6.5: the page itself needs no token. It holds no data until it calls
+# the API, which does.
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

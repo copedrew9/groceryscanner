@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pantry</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --line: #dddddd;
+    --accent: #2f6f4e;
+    --warn: #8a1f1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161719;
+      --fg: #eceded;
+      --muted: #9a9a9a;
+      --line: #333438;
+      --accent: #6dbb90;
+      --warn: #e58b8b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 17px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    /* Room for the thumb on a phone, and for the iOS home indicator. */
+    padding: 0 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  header {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  button {
+    font: inherit;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    /* 44px minimum, so the buttons are hittable one-handed in a grocery aisle. */
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 12px;
+    cursor: pointer;
+  }
+  button:active { background: var(--line); }
+  button[disabled] { opacity: 0.4; cursor: default; }
+  #status { color: var(--muted); margin: 12px 0; }
+  #status.error { color: var(--warn); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .details { flex: 1; min-width: 0; }
+  .name { overflow-wrap: anywhere; }
+  .name.unnamed { color: var(--muted); font-family: ui-monospace, monospace; }
+  .brand { color: var(--muted); font-size: 14px; }
+  .quantity {
+    font-variant-numeric: tabular-nums;
+    font-size: 20px;
+    min-width: 2ch;
+    text-align: center;
+  }
+  .quantity.zero { color: var(--muted); }
+  form { display: flex; flex-direction: column; gap: 12px; max-width: 32rem; }
+  label { color: var(--muted); font-size: 14px; }
+  input {
+    font: inherit;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    width: 100%;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Pantry</h1>
+  <button id="refresh" type="button">Refresh</button>
+</header>
+
+<p id="status" role="status"></p>
+
+<form id="token-form" hidden>
+  <label for="token-input">API token</label>
+  <input id="token-input" type="password" autocomplete="off"
+         autocapitalize="off" autocorrect="off" spellcheck="false">
+  <button type="submit">Save</button>
+</form>
+
+<main id="main" hidden>
+  <ul id="inventory"></ul>
+</main>
+
+<script>
+"use strict";
+
+const TOKEN_KEY = "pantry-token";
+
+const el = {
+  status: document.getElementById("status"),
+  refresh: document.getElementById("refresh"),
+  tokenForm: document.getElementById("token-form"),
+  tokenInput: document.getElementById("token-input"),
+  main: document.getElementById("main"),
+  inventory: document.getElementById("inventory"),
+};
+
+function setStatus(text, isError) {
+  el.status.textContent = text;
+  el.status.classList.toggle("error", Boolean(isError));
+}
+
+function showTokenForm(message) {
+  el.tokenForm.hidden = false;
+  el.main.hidden = true;
+  el.tokenInput.value = "";
+  setStatus(message, Boolean(message));
+  el.tokenInput.focus();
+}
+
+/* Thrown when the server rejects the token, so callers can stop instead of
+   rendering a half-loaded page. */
+class Unauthorized extends Error {}
+
+async function api(path, options) {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const settings = Object.assign({}, options);
+  settings.headers = Object.assign(
+    { "Authorization": "Bearer " + token },
+    options && options.body ? { "Content-Type": "application/json" } : null,
+    settings.headers
+  );
+
+  const response = await fetch(path, settings);
+
+  if (response.status === 401) {
+    /* Spec section 7: on any 401, drop the stored token and ask again. */
+    localStorage.removeItem(TOKEN_KEY);
+    showTokenForm("That token was rejected. Try again.");
+    throw new Unauthorized();
+  }
+
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = body && body.error ? body.error.message : "Request failed";
+    throw new Error(message);
+  }
+  return body;
+}
+
+function displayName(item) {
+  return item.name && item.name.trim() ? item.name.trim() : item.barcode;
+}
+
+function renderInventory(items) {
+  el.inventory.replaceChildren();
+
+  if (items.length === 0) {
+    setStatus("Nothing in the pantry yet. Scan something.");
+    return;
+  }
+  setStatus(items.length + (items.length === 1 ? " item" : " items"));
+
+  for (const item of items) {
+    const row = document.createElement("li");
+
+    const details = document.createElement("div");
+    details.className = "details";
+
+    const name = document.createElement("div");
+    name.className = item.name ? "name" : "name unnamed";
+    name.textContent = displayName(item);
+    details.append(name);
+
+    if (item.brand) {
+      const brand = document.createElement("div");
+      brand.className = "brand";
+      brand.textContent = item.brand;
+      details.append(brand);
+    }
+
+    const quantity = document.createElement("span");
+    quantity.className = item.quantity === 0 ? "quantity zero" : "quantity";
+    quantity.textContent = String(item.quantity);
+
+    row.append(
+      details,
+      makeStepper(item, -1, "−", quantity),
+      quantity,
+      makeStepper(item, 1, "+", quantity)
+    );
+    el.inventory.append(row);
+  }
+}
+
+function makeStepper(item, delta, label, quantityNode) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.setAttribute(
+    "aria-label", (delta > 0 ? "Add one " : "Remove one ") + displayName(item)
+  );
+  button.disabled = delta < 0 && item.quantity === 0;
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const updated = await api(
+        "/api/inventory/" + encodeURIComponent(item.barcode),
+        { method: "PATCH", body: JSON.stringify({ delta: delta }) }
+      );
+      /* Update just this row rather than reloading the whole list, so the page
+         does not jump while you are tapping. */
+      item.quantity = updated.quantity;
+      quantityNode.textContent = String(updated.quantity);
+      quantityNode.className = updated.quantity === 0 ? "quantity zero" : "quantity";
+      setStatus("");
+    } catch (error) {
+      if (error instanceof Unauthorized) return;
+      setStatus(error.message, true);
+    } finally {
+      button.disabled = delta < 0 && item.quantity === 0;
+    }
+  });
+  return button;
+}
+
+async function load() {
+  if (!localStorage.getItem(TOKEN_KEY)) {
+    showTokenForm("Enter the API token to get started.");
+    return;
+  }
+  el.tokenForm.hidden = true;
+  el.main.hidden = false;
+  el.refresh.disabled = true;
+  setStatus("Loading…");
+  try {
+    const data = await api("/api/inventory");
+    renderInventory(data.items);
+  } catch (error) {
+    if (!(error instanceof Unauthorized)) setStatus(error.message, true);
+  } finally {
+    el.refresh.disabled = false;
+  }
+}
+
+el.tokenForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const token = el.tokenInput.value.trim();
+  if (!token) return;
+  localStorage.setItem(TOKEN_KEY, token);
+  load();
+});
+
+el.refresh.addEventListener("click", load);
+
+load();
+</script>
+</body>
+</html>
