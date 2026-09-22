@@ -26,6 +26,12 @@ from app import db  # noqa: E402
 
 
 @pytest.fixture
+def token() -> str:
+    """The token the client fixture sends, for tests that need it verbatim."""
+    return TEST_TOKEN
+
+
+@pytest.fixture
 def db_file(tmp_path, monkeypatch) -> Path:
     """A temp database with migrations applied, wired up as DB_PATH."""
     path = tmp_path / "inventory.db"
