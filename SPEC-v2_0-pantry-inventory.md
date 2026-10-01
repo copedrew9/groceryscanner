@@ -563,3 +563,89 @@ Tests to write as you go: idempotency, quantity flooring, partial batch failure,
 - **Replaced:** separate device and user auth → one shared `API_TOKEN`. Portability seam → `hw.h`, which exists for laptop testing and now includes buzzer/LED control. `schema_version` table → `PRAGMA user_version`. General cursor pagination → `before=<id>` on events only. `/api/v1/` → `/api/`.
 - **Fixed:** v1.0 required both whole-body Pydantic validation and partial-batch success, which contradict each other. Elements are now validated individually, with a new `invalid` result. `scan_rec_t.barcode` grows from 32 to 33 bytes so a 32-character barcode fits with its terminating NUL.
 - **Kept:** wire protocol, nonce deduplication, the event log as the record of truth, the serial/framing/buffer/retry design, Docker, Tailscale, and backup.
+
+---
+
+## 15. Addendum v2.1 — the scanner client is Python
+
+**Status:** supersedes section 5, the `scanner/` half of section 6.8, and
+acceptance criterion 13. Everything else in v2.0 stands unchanged, including
+the whole of the wire protocol (section 4) and the server (section 6).
+
+The scanner client is written in Python with `pyserial`, not in C. The server
+is unaffected: its contract with the scanner is HTTP, JSON and a bearer token,
+and it has never depended on what language is on the other end.
+
+### 15.1 What is unchanged
+
+Everything in section 4 — the envelope, the field constraints, the four result
+values, and all four client-side rules. In particular the rules most likely to
+be got wrong are language-independent and still binding:
+
+- The nonce is generated when the barcode is scanned and **never regenerated**
+  on retry.
+- `duplicate` is a success; a result of any kind frees the slot.
+- HTTP 401 is permanent: log, signal, and stop sending.
+
+The hardware preparation in section 3 is also unchanged. `pyserial` reads
+corrupted bytes off a misconfigured mini UART exactly as readily as C does, so
+`dtoverlay=disable-bt`, the disabled serial console, `/dev/serial0`, and the
+3.3V level check on module-TX → Pi-RX all still apply.
+
+### 15.2 What section 5 is replaced by
+
+The design rules of section 5 survive; only their expression changes.
+
+| v2.0 | v2.1 | Note |
+|---|---|---|
+| 5.1 `poll()` loop with computed timeout | `selectors` loop, same computed timeout | Structure unchanged |
+| 5.2 termios flag clearing | `serial.Serial(port, 9600, timeout=0)` | `pyserial` opens raw, so `ICANON`, `ICRNL` and `IXON` are not a concern |
+| 5.3 Framing, 64-byte buffer, 200ms stale-frame timeout | Unchanged as a rule | Still the module most worth unit-testing |
+| 5.4 GPIO read at scan completion | Unchanged, via `gpiod` Python bindings | Criterion 8 is unaffected |
+| 5.5 Fixed 32-entry buffer, drop oldest | `collections.deque(maxlen=32)` | Drop-oldest is the deque's own behaviour |
+| 5.6 Backoff table, index not reset by a new scan | Unchanged | The rule is the point, not the array |
+| 5.7 libcurl, one reused easy handle | `httpx.Client` reused for the process | `httpx.Timeout(10.0, connect=5.0)` matches the two curl timeouts |
+| 5.7 cJSON, vendored | `json` from the standard library | Nothing to vendor; response accessors still null-checked |
+| 5.8 Feedback signals | Unchanged | Still gated by `FEEDBACK_ENABLED` |
+| 5.9 `hw.h` / `hw_linux.c` seam | `client/hw.py` | Same purpose: `pyserial`, `gpiod` and `httpx` appear nowhere else, so the logic modules test on a laptop |
+| 5.10 `.env` keys | Unchanged | Same seven keys |
+
+Fixed-size buffers and the absence of `malloc` were C concerns and do not carry
+over. The 32-entry cap on the in-flight buffer does carry over, because it is a
+protocol-visible choice: the scanner never sends a batch larger than it.
+
+### 15.3 Layout, replacing the `scanner/` tree in 6.8
+
+```
+scanner/
+  client/
+    config.py      .env loading and validation (5.10)
+    models.py      ScanRecord
+    hw.py          serial, GPIO, buzzer/LED, HTTP, clock, random (5.9)
+    proto.py       request building, response parsing (5.7)
+    frame.py       framing (5.3)
+    queue.py       in-flight buffer (5.5)
+    backoff.py     retry timing (5.6)
+    main.py        the loop, wiring the modules together (5.1)
+  tests/
+  requirements.txt
+  .env.example
+  pantry-scanner.service
+```
+
+### 15.4 Acceptance criterion 13, restated
+
+> `pyserial`, `gpiod` and `httpx` appear only in `client/hw.py`, and the unit
+> tests for `frame`, `queue`, `backoff` and `proto` pass on a laptop with no Pi
+> attached.
+
+Criteria 8 through 12 are unchanged.
+
+### 15.5 Why
+
+Recorded so the trade is not forgotten: v2.0 said writing the serial,
+buffering and retry client in C was part of the point of the project. Python
+removes that lesson — manual framing over a byte stream, fixed-size buffers,
+and `poll()` with a computed timeout. It buys a working end-to-end system
+sooner. Because the server cannot tell the difference, porting the client back
+to C later remains open and would invalidate nothing else.

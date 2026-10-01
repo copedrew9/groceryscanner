@@ -14,12 +14,19 @@ Never edit, rewrite, or "fix" these. You may read them, and review them when I a
 
 - `server/app/scans.py` — if it doesn't exist yet, you may create the stub described in the build prompt. Once it exists, don't change it.
 - `server/tests/test_core.py` — same rule: you may create it containing only a comment, then leave it alone.
-- `scanner/src/hw.h`
-- `scanner/src/frame.c`, `scanner/src/frame.h`
-- `scanner/src/queue.c`, `scanner/src/queue.h`
-- `scanner/src/backoff.c`, `scanner/src/backoff.h`
-- `scanner/src/main.c`
-- `scanner/tests/test_queue.c`
+- `scanner/client/frame.py` — framing (spec 5.3)
+- `scanner/client/queue.py` — in-flight buffer (spec 5.5)
+- `scanner/client/backoff.py` — retry timing (spec 5.6)
+- `scanner/client/main.py` — the loop, and wiring the modules together (spec 5.1)
+- `scanner/tests/test_queue.py`
+
+Same rule as `scans.py` for all five: Claude may create the stub with the
+documented interface, then never touch it again.
+
+The scanner client is Python (pyserial), not C. The C file list this section
+used to carry is gone with it; see the v2.1 addendum in the spec. `hw.py` is
+now Claude's, because Python has no header/implementation split and what is
+left is pure plumbing.
 
 ## When I ask for a review of my files
 

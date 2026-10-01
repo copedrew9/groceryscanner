@@ -1,0 +1,25 @@
+# Spec section 8. Install to /etc/systemd/system/ on the Pi.
+#
+# Not containerized: it needs direct access to the serial port and GPIO.
+[Unit]
+Description=Pantry scanner client
+# network-online, not just network: the client resolves a LAN hostname at
+# startup, and "network up" does not mean DNS answers yet.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pantry
+# dialout for /dev/serial0, gpio for the switch and buzzer.
+SupplementaryGroups=dialout gpio
+WorkingDirectory=/opt/pantry-scanner
+EnvironmentFile=/opt/pantry-scanner/.env
+ExecStart=/opt/pantry-scanner/.venv/bin/python -m client.main
+# Spec section 8, and acceptance criterion 14: recover from a restart of
+# either service, in any order.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Scanner client dependencies. Pinned so a rebuild on the Pi gets the same set.
+pyserial==3.5
+httpx==0.28.1
+
+# GPIO. Pi-only: hw.py imports it lazily and runs without it, so the client
+# still starts on a laptop for development. On Raspberry Pi OS the system
+# package is usually preferable:  sudo apt install python3-libgpiod
+gpiod==2.2.1 ; platform_machine == "aarch64" or platform_machine == "armv7l"
